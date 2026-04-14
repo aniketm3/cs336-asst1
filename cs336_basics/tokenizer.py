@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 from typing import BinaryIO
 import heapq
+import mmap
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -118,12 +119,17 @@ def merge_pair_optimized(
                     old_left = (new_seq[-1], l)
                     pair_counts[old_left] -= count
                     heapq.heappush(heap, (-pair_counts[old_left], RevPair(old_left)))
+                    if pair_counts[old_left] == 0:
+                        del pair_counts[old_left]
                     pair_index[old_left].discard(token_seq)
+
 
                 if i + 2 < len(token_seq):
                     old_right = (r, token_seq[i+2])
                     pair_counts[old_right] -= count
                     heapq.heappush(heap, (-pair_counts[old_right], RevPair(old_right)))
+                    if pair_counts[old_right] == 0:
+                        del pair_counts[old_right]
                     pair_index[old_right].discard(token_seq)
 
                 new_seq.append(new_token)
@@ -150,7 +156,7 @@ def merge_pair_optimized(
         for i in range(len(new_token_seq) - 1):
             pair_index[(new_token_seq[i], new_token_seq[i+1])].add(new_token_seq)
     
-    pair_counts[pair] = 0
+    del pair_counts[pair]
     return pretoken_count
 
 # main function to train the BPE
@@ -203,9 +209,12 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]) -> tu
     
 def pretokenize(args: tuple[str, int, int, list[str]]) -> defaultdict[tuple[bytes, int], int]:
     input_path, start, end, special_tokens = args
+
     with open(input_path, "rb") as f:
-        f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        with mmap.mmap(f.fileno(), length=0, access=mmap.ACCESS_READ) as mm:
+            mv = memoryview(mm)
+            chunk = bytes(mv[start:end]).decode("utf-8", errors="ignore")
+            mv.release()
     
     if special_tokens:
         special_pattern = "|".join(re.escape(st) for st in special_tokens)
@@ -213,6 +222,8 @@ def pretokenize(args: tuple[str, int, int, list[str]]) -> defaultdict[tuple[byte
 
     else:
         parts = [chunk]
+
+    del chunk
     
     pretoken_count = defaultdict(int)
     for part in parts:
@@ -244,7 +255,7 @@ def train_bpe_optimized(input_path: str, vocab_size: int, special_tokens: list[s
 
     # pretokenization --> splitting on special tokens into different chunks
     t1 = time.time()
-    num_processes = mp.cpu_count()
+    num_processes = min(mp.cpu_count(), 4)
 
     pretoken_count = defaultdict(int)
 
@@ -254,11 +265,9 @@ def train_bpe_optimized(input_path: str, vocab_size: int, special_tokens: list[s
     chunk_args = [(input_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
     
     with mp.Pool(num_processes) as pool:
-        results = pool.map(pretokenize, chunk_args)
-    
-    for chunk in results:
-        for token, count in chunk.items():
-            pretoken_count[token] += count
+        for chunk_counts in pool.imap(pretokenize, chunk_args):
+            for token, count in chunk_counts.items():
+                pretoken_count[token] += count        
 
     print(f"Time taken for pretokenization: {time.time() - t1} seconds")
 

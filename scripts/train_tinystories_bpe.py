@@ -12,7 +12,7 @@ if __name__ == "__main__":
 
     input_path = "data/TinyStoriesV2-GPT4-train.txt"
 
-    tracemalloc.start()
+    # tracemalloc.start()
 
     with cProfile.Profile() as pr:
         vocab, merges = train_bpe_optimized(
